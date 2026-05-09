@@ -1,10 +1,11 @@
 """
 Storytelling Application for Kids (Ages 3-10)
 =============================================
-- Upload an image
-- Generate a caption using BLIP image-to-text
-- Expand the caption into a ~150-word children's story with distilgpt2
-- Convert the story to speech with gTTS
+- Upload an image.
+- Generate a caption using BLIP image-to-text.
+- Expand the caption into a ~150-word story by letting distilgpt2
+  continue a simple fairy-tale opening (teacher's classroom method).
+- Convert the story to speech with gTTS.
 """
 
 import os
@@ -38,22 +39,18 @@ def img2text(image: Image.Image) -> str:
 
 def text2story(caption: str) -> str:
     """
-    Turn the caption into a ~150-word child-friendly story.
-    Uses a simple, natural-language prompt and a fixed opening.
+    Expand the caption into a ~150-word children's story.
+    Uses a simple fairy-tale opening so the model naturally continues
+    with a story — just like the classroom demonstration.
     """
     generator = load_story_generator_model()
 
-    prompt = (
-        f"Write a short, fun story for children aged 3-10 (about 150 words) "
-        f"based on this scene: {caption}. "
-        f"The story should use simple language, be positive and magical, "
-        f"and should NOT include social media, comments, URLs, or adult content.\n"
-        f"Once upon a time,"
-    )
+    # Simple opening – the model will continue from here
+    prompt = f"Once upon a time, there was {caption}."
 
     result = generator(
         prompt,
-        max_new_tokens=200,          # room for ~150 words
+        max_new_tokens=200,           # enough room for ~150 words
         temperature=0.85,
         pad_token_id=generator.tokenizer.eos_token_id,
         do_sample=True,
@@ -62,8 +59,8 @@ def text2story(caption: str) -> str:
         repetition_penalty=1.2
     )[0]["generated_text"]
 
-    story = result[len(prompt):].strip()
-    return story
+    # Return the entire story (opening + continuation)
+    return result.strip()
 
 def text2audio(story_text: str) -> str:
     """Convert story text to speech and return path to temporary MP3 file."""
