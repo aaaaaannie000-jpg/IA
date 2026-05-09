@@ -38,31 +38,36 @@ def img2text(image: Image.Image) -> str:
 
 def text2story(caption: str) -> str:
     """
-    Turn the image caption into a short, child-friendly story (50-100 words).
-    All requirements are specified directly in the prompt.
+    Turn the image caption into a short, child-friendly story (50-100 words)
+    using a structured prompt.
     """
     generator = load_story_generator_model()
 
+    # Your provided prompt template
     prompt = (
-        f"Write a short, cute bedtime story for children aged 3-10 (50 to 100 words) "
-        f"based on the following description: {caption}.\n"
-        f"Do not mention social media, comments, subscribe, follow me, URLs, "
-        f"or any adult content. The story should be safe, happy, and suitable for toddlers.\n"
-        f"Once upon a time,"
+        f'You are a creative storyteller for children aged 3-10. Based on the image description provided below, write a short, fun, and imaginative story.\n\n'
+        f'**Image Description:**\n'
+        f'"{caption}"\n\n'
+        f'**Guidelines:**\n'
+        f'1.  **Theme & Relevance:** The story must directly include the main subject and action from the image description above. Do not introduce unrelated elements.\n'
+        f'2.  **Target Audience:** Use simple, easy-to-understand language suitable for young kids. The tone should be positive, magical, or educational.\n'
+        f'3.  **Length:** Strictly keep the story between 50 to 100 words.\n'
+        f'4.  **Content:** Focus on feelings, colors, or a small adventure. Avoid complex plots or scary themes.\n\n'
+        f'Story:'
     )
 
     result = generator(
         prompt,
-        max_new_tokens=120,
-        temperature=0.85,
+        max_new_tokens=150,
+        temperature=0.9,
         pad_token_id=generator.tokenizer.eos_token_id,
         do_sample=True,
         top_k=50,
-        top_p=0.9,
+        top_p=0.95,
         repetition_penalty=1.2
     )[0]["generated_text"]
 
-    # Return only the generated story (everything after the prompt)
+    # Extract only the generated story (after "Story:")
     return result[len(prompt):].strip()
 
 def text2audio(story_text: str) -> str:
