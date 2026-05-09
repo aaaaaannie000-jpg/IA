@@ -2,10 +2,10 @@
 Storytelling Application for Kids (Ages 3-10)
 =============================================
 - Upload an image
-- Generate a caption using BLIP
-- Expand the caption into a 50‑100 word children's story with GPT-2
-- Automatically pick the best (safe, complete) candidate
-- Convert the story to speech with gTTS
+- Generate a caption using BLIP (Salesforce/blip-image-captioning-base)
+- Expand the caption into a 50–100 word children's story with distilgpt2
+- Uses teacher's continuation method + multi-candidate selection
+- Converts the story to speech with gTTS
 """
 
 import os
@@ -23,34 +23,54 @@ import re
 
 @st.cache_resource
 def load_image_caption_model():
-    """Load BLIP image captioning model."""
+    """Load BLIP image captioning model (as recommended by the assignment)."""
     return pipeline("image-to-text", model="Salesforce/blip-image-captioning-base")
 
 @st.cache_resource
 def load_story_generator_model():
-    """Load GPT-2 for story generation (most stable on Streamlit Cloud)."""
-    return pipeline("text-generation", model="gpt2")
+    """Load distilgpt2 – lightweight and exactly what the skeleton specified."""
+    return pipeline("text-generation", model="distilgpt2")
 
-# ---------- Simple Text Helpers ----------
+# ---------- Simple text helpers ----------
 
-# Very small list of words that must NOT appear in a children's story
-UNSAFE_WORDS = [
-    "kill", "axe", "gun", "knife", "blood", "murder",
-    "sex", "nude", "naked", "porn", "drug", "alcohol",
-    "rape", "suicide", "dead", "death", "bomb"
-]
+def is_clean_sentence(text: str) -> bool:
+    """
+    Return False if the text looks like leftover social media fluff,
+    article clippings, or random punctuation fragments.
+    """
+    lower = text.lower()
+    # Common garbage patterns from distilgpt2
+    garbage_patterns = [
+        r"stuff$",                     # lines that just end with "Stuff"
+        r"it's just that",            # typical blog/comment phrasing
+        r"that's right",
+        r"check out",
+        r"subscribe",
+        r"follow me",
+        r"let us know",
+        r"what do you think",
+        r"i made my first",
+        r"re[- ]released",
+        r"click here",
+    ]
+    for pat in garbage_patterns:
+        if re.search(pat, lower):
+            return False
+    # Also discard very short sentences (< 3 words) that are likely noise
+    if len(text.split()) < 3:
+        return False
+    return True
 
-def is_safe(text: str) -> bool:
-    """Return True if the text does not contain any unsafe word."""
-    words = set(re.findall(r'\b\w+\b', text.lower()))
-    return not words.intersection(UNSAFE_WORDS)
-
-def trim_to_complete_sentences(text: str, max_words: int = 110) -> str:
-    """Keep only whole sentences up to max_words."""
-    sentences = re.split(r'(?<=[.!?])\s+', text)
+def trim_story(text: str, max_words: int = 110) -> str:
+    """
+    Keep only complete, clean sentences up to ~100 words.
+    """
+    raw_sentences = re.split(r'(?<=[.!?])\s+', text)
+    clean_sentences = [s.strip() for s in raw_sentences if is_clean_sentence(s.strip())]
+    
     result = ""
     wc = 0
-    for sent in sentences:
+    for sent in clean_sentences:
         words = len(sent.split())
         if wc + words > max_words:
             break
@@ -60,10 +80,9 @@ def trim_to_complete_sentences(text: str, max_words: int = 110) -> str:
 
 def story_candidate_score(text: str) -> int:
     """
-    Score a story candidate. Higher is better.
-    - Length 40‑110 words: +2 points
-    - Ends with . ! or ?: +1 point
-    - Contains unsafe word: -100 points (disqualified)
+    Score a candidate story. Higher = better.
+    - 40‑110 words: +2
+    - Ends with . ! or ?: +1
     """
     score = 0
     word_count = len(text.split())
@@ -71,27 +90,21 @@ def story_candidate_score(text: str) -> int:
         score += 2
     if text and text[-1] in ".!?":
         score += 1
-    if not is_safe(text):
-        score -= 100
     return score
 
 # ---------- Core Functions ----------
 
 def img2text(image: Image.Image) -> str:
-    """Generate a descriptive caption from the uploaded image."""
     captioner = load_image_caption_model()
     return captioner(image)[0]["generated_text"]
 
 def text2story(caption: str) -> str:
     """
-    Generate 3 story candidates with GPT-2 and select the best one.
-    The scoring automatically rejects unsafe content.
+    Generate 3 story continuations from distilgpt2 using the teacher's
+    minimal-prompt method, then pick the best one.
     """
     generator = load_story_generator_model()
     prompt = f"Once upon a time, there was {caption}."
-
-    best_story = ""
-    best_score = -999
 
     # Generate 3 candidates
     results = generator(
@@ -106,25 +119,26 @@ def text2story(caption: str) -> str:
         num_return_sequences=3
     )
 
+    best_story = ""
+    best_score = -999
+
     for r in results:
         full_text = r["generated_text"].strip()
-        if not full_text.startswith(prompt):
+        # Trim to clean, complete sentences
+        trimmed = trim_story(full_text, 100)
+        if not trimmed:
             continue
-        # Trim to about 100 words
-        trimmed = trim_to_complete_sentences(full_text, 100)
         s = story_candidate_score(trimmed)
         if s > best_score:
             best_score = s
             best_story = trimmed
 
-    # If no good candidate, return a safe, minimal fallback
-    if best_score < 0 or not best_story:
+    if not best_story:
         best_story = f"Once upon a time, there was {caption}. They lived happily ever after. The end."
 
     return best_story
 
 def text2audio(story_text: str) -> str:
-    """Convert story text to speech and return path to MP3."""
     tts = gTTS(story_text, lang="en")
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
         tts.save(fp.name)
