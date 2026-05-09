@@ -39,7 +39,7 @@ def load_sentiment_model():
 
 # ---------- Helper to trim story to 50-100 words ----------
 
-def trim_to_sentence_range(text: str, min_words=30, max_words=110) -> str:
+def trim_to_sentence_range(text: str, max_words=150) -> str:
     """Keep complete sentences up to ~100 words."""
     sentences = re.split(r'(?<=[.!?])\s+', text)
     result = ""
