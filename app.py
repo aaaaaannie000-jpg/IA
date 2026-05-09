@@ -1,10 +1,11 @@
 """
 Storytelling Application for Kids (Ages 3-10)
 =============================================
-- Upload an image.
-- Generate a caption using BLIP image-to-text.
-- Expand the caption into a 50-100 word children's story with GPT-2.
-- Convert the story to speech with gTTS.
+- Upload an image
+- Generate a caption using BLIP image-to-text
+- Expand the caption into a 50-100 word children's story with GPT-2
+- Automatically select the best story among multiple candidates
+- Convert the story to speech with gTTS
 """
 
 import os
@@ -27,75 +28,123 @@ def load_image_caption_model():
 
 @st.cache_resource
 def load_story_generator_model():
-    """Load GPT-2 for story generation (same as teacher's demo)."""
+    """Load GPT-2 for story generation."""
     return pipeline("text-generation", model="gpt2")
 
-# ---------- Simple text helpers ----------
+# ---------- Text helpers ----------
 
-def clean_story_text(text:str) -> str:
-    """Remove occasional social media/comment fluff."""
-    # Remove phrases like "This is what we have seen from this photo!", "It's amazing how awesome it looks..."
-    text = re.sub(r"(?i)(this is what we have seen|it['’]?s amazing how awesome it looks|subscribe|follow me|check out|click here|let us know in the comments).*?[.!?]", "", text)
-    # Remove URLs
-    text = re.sub(r"http\S+", "", text)
-    # Remove extra whitespace
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+def is_comment_fluff(text: str) -> bool:
+    """Check if the text contains typical comment/youtube fluff."""
+    fluff_patterns = [
+        r"subscribe",
+        r"like and share",
+        r"follow me",
+        r"click here",
+        r"let us know in the comments",
+        r"that['’]?s right",
+        r"check out",
+        r"what do you think",
+        r"i made my first video",
+        r"re[- ]released on",
+        r"my favourite rides",
+    ]
+    text_lower = text.lower()
+    for pat in fluff_patterns:
+        if re.search(pat, text_lower):
+            return True
+    return False
 
-def trim_to_sentence_range(text:str, min_words=30, max_words=110) -> str:
-    """Keep only complete sentences up to ~100 words."""
+def story_length_ok(text: str, min_words=40, max_words=120) -> bool:
+    words = text.split()
+    return min_words <= len(words) <= max_words
+
+def trim_to_sentence_end(text: str, max_words=110) -> str:
+    """Trim text to complete sentences within max_words."""
     sentences = re.split(r'(?<=[.!?])\s+', text)
     result = ""
-    word_count = 0
+    wc = 0
     for sent in sentences:
         words = len(sent.split())
-        if word_count + words > max_words:
+        if wc + words > max_words:
             break
         result += sent + " "
-        word_count += words
+        wc += words
     return result.strip()
+
+def score_story(text: str) -> int:
+    """
+    Score how good a story is. Higher is better.
+    2 points for no fluff, 1 point for correct length, 1 point for ending with punctuation.
+    """
+    score = 0
+    if not is_comment_fluff(text):
+        score += 2
+    if story_length_ok(text, 40, 120):
+        score += 1
+    if text and text[-1] in ".!?":
+        score += 1
+    return score
 
 # ---------- Core Functions ----------
 
 def img2text(image:Image.Image) -> str:
-    """Generate a descriptive caption from the uploaded image."""
     captioner = load_image_caption_model()
     return captioner(image)[0]["generated_text"]
 
 def text2story(caption:str) -> str:
     """
-    Turn the caption into a 50-100 word children's story.
-    Uses a simple fairy-tale opening that GPT-2 will naturally continue.
+    Generate 3 candidate stories and return the best one.
+    If none are good, retry with higher temperature.
     """
     generator = load_story_generator_model()
-
-    # A clean story opening — the model will continue from here.
     prompt = f"Once upon a time, there was {caption}."
+    
+    best_story = ""
+    best_score = -1
+    attempts = 2
+    temp = 0.85
 
-    raw = generator(
-        prompt,
-        max_new_tokens=150,          # enough for ~100 words
-        temperature=0.85,
-        pad_token_id=generator.tokenizer.eos_token_id,
-        do_sample=True,
-        top_k=50,
-        top_p=0.9,
-        repetition_penalty=1.2
-    )[0]["generated_text"]
+    for attempt in range(attempts):
+        # Generate 3 candidates
+        results = generator(
+            prompt,
+            max_new_tokens=150,
+            temperature=temp,
+            pad_token_id=generator.tokenizer.eos_token_id,
+            do_sample=True,
+            top_k=50,
+            top_p=0.9,
+            repetition_penalty=1.2,
+            num_return_sequences=3
+        )
+        
+        for r in results:
+            full_text = r["generated_text"].strip()
+            # Clean possible fluff (just in case)
+            # Actually we rely on scoring, but we can do a light clean
+            story_candidate = full_text
+            if len(story_candidate) < len(prompt):
+                continue
+            # Trim to roughly 100 words
+            trimmed = trim_to_sentence_end(story_candidate, 100)
+            s = score_story(trimmed)
+            if s > best_score:
+                best_score = s
+                best_story = trimmed
+        
+        # If we already have a good story (score >= 4), break
+        if best_score >= 4:
+            break
+        # Otherwise, increase temperature to get more variety
+        temp += 0.15
 
-    # Extract the whole story (opening + continuation)
-    story = raw.strip()
-
-    # Light cleanup: remove occasional social-media phrases
-    story = clean_story_text(story)
-
-    # Trim to 50-100 words, keeping whole sentences
-    story = trim_to_sentence_range(story, min_words=50, max_words=100)
-
-    return story
+    # If still no good story, just return the best we have (or the first one)
+    if not best_story:
+        best_story = "Once upon a time, there was " + caption + ". They lived happily ever after. The end."
+    
+    return best_story
 
 def text2audio(story_text:str) -> str:
-    """Convert story text to speech and return path to MP3."""
     tts = gTTS(story_text, lang="en")
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
         tts.save(fp.name)
