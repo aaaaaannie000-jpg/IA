@@ -3,7 +3,7 @@ Storytelling Application for Kids (Ages 3-10)
 =============================================
 - Upload an image
 - Generate a caption using BLIP image-to-text
-- Expand the caption into a 50-100 word children's story with distilgpt2
+- Expand the caption into a ~150-word children's story with distilgpt2
 - Convert the story to speech with gTTS
 """
 
@@ -38,37 +38,32 @@ def img2text(image: Image.Image) -> str:
 
 def text2story(caption: str) -> str:
     """
-    Turn the image caption into a short, child-friendly story (50-100 words)
-    using a structured prompt.
+    Turn the caption into a ~150-word child-friendly story.
+    Uses a simple, natural-language prompt and a fixed opening.
     """
     generator = load_story_generator_model()
 
-    # Your provided prompt template
     prompt = (
-        f'You are a creative storyteller for children aged 3-10. Based on the image description provided below, write a short, fun, and imaginative story.\n\n'
-        f'**Image Description:**\n'
-        f'"{caption}"\n\n'
-        f'**Guidelines:**\n'
-        f'1.  **Theme & Relevance:** The story must directly include the main subject and action from the image description above. Do not introduce unrelated elements.\n'
-        f'2.  **Target Audience:** Use simple, easy-to-understand language suitable for young kids. The tone should be positive, magical, or educational.\n'
-        f'3.  **Length:** Strictly keep the story between 50 to 100 words.\n'
-        f'4.  **Content:** Focus on feelings, colors, or a small adventure. Avoid complex plots or scary themes.\n\n'
-        f'Story:'
+        f"Write a short, fun story for children aged 3-10 (about 150 words) "
+        f"based on this scene: {caption}. "
+        f"The story should use simple language, be positive and magical, "
+        f"and should NOT include social media, comments, URLs, or adult content.\n"
+        f"Once upon a time,"
     )
 
     result = generator(
         prompt,
-        max_new_tokens=150,
-        temperature=0.9,
+        max_new_tokens=200,          # room for ~150 words
+        temperature=0.85,
         pad_token_id=generator.tokenizer.eos_token_id,
         do_sample=True,
         top_k=50,
-        top_p=0.95,
+        top_p=0.9,
         repetition_penalty=1.2
     )[0]["generated_text"]
 
-    # Extract only the generated story (after "Story:")
-    return result[len(prompt):].strip()
+    story = result[len(prompt):].strip()
+    return story
 
 def text2audio(story_text: str) -> str:
     """Convert story text to speech and return path to temporary MP3 file."""
