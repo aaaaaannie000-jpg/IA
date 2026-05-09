@@ -2,13 +2,14 @@
 Storytelling Application for Kids (Ages 3-10)
 =============================================
 - Users upload an image.
-- The app generates a caption using an image-to-text model.
-- The caption is expanded into a 50-100 word story for children.
-- The story is converted to speech and can be played directly.
+- A caption is generated using BLIP (image-to-text).
+- The caption is expanded into a 50-100 word story using a
+  child‑story fine‑tuned GPT-2 model (mrm8488/gpt2-child-stories).
+- The story is converted to speech with gTTS.
 """
 
 import os
-# Hide model download progress bars and reduce console noise
+# Suppress model download progress bars and verbose Hugging Face logs
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 
@@ -19,30 +20,31 @@ from gtts import gTTS
 import tempfile
 import re
 
-# ---------- Model Loading with Streamlit Caching ----------
+# ---------- Model Caching ----------
+# Models are loaded only once and then reused.
 
 @st.cache_resource
 def load_image_caption_model():
-    """Load the image captioning model."""
+    """Load the BLIP image captioning model."""
     return pipeline(model="Salesforce/blip-image-captioning-base")
 
 @st.cache_resource
 def load_story_generator_model():
-    """Load GPT-2 (same model used in class demo). 
-    If deployment size is an issue, fall back to 'distilgpt2'.
+    """Load a GPT-2 model fine-tuned on children's stories.
+    This model is small (88M) and generates safe, age-appropriate content.
     """
-    return pipeline(model="gpt2")      # Same as the teacher's demo
+    return pipeline(model="mrm8488/gpt2-child-stories")
 
 # ---------- Text Normalization Helpers ----------
 
 def normalize_capitalization(text: str) -> str:
-    """Make the story start with a capital letter and capitalize 
-    the first letter of each sentence."""
+    """
+    Capitalize the first letter of the story and the first letter
+    of each sentence.
+    """
     if not text:
         return text
-    # Capitalize the first character of the whole text
     text = text[0].upper() + text[1:]
-    # Capitalize the first letter after every sentence-ending punctuation
     sentences = re.split(r'(?<=[.!?])\s+', text)
     normalized = []
     for sent in sentences:
@@ -52,9 +54,12 @@ def normalize_capitalization(text: str) -> str:
     return ' '.join(normalized)
 
 def clean_story_text(text: str) -> str:
-    """Remove common social media / comment fluff from generated text."""
+    """
+    Remove common social‑media engagement phrases, URLs, and extra
+    whitespace that occasionally leak from the base GPT-2 backbone.
+    """
     text = re.sub(
-        r"(?i)(follow\s*(me|us)\s*on\s*\S+|let\s*us\s*know\s*in\s*the\s*comments\s*below|subscribe\s*to\s*our\s*channel|click\s*here|like\s*and\s*share).*?\.", 
+        r"(?i)(follow\s*(me|us)\s*on\s*\S+|let\s*us\s*know\s*in\s*the\s*comments\s*below|subscribe\s*to\s*our\s*channel|click\s*here|like\s*and\s*share).*?\.",
         "", text
     )
     text = re.sub(r"http\S+", "", text)
@@ -63,7 +68,7 @@ def clean_story_text(text: str) -> str:
     return text.strip()
 
 def contains_comment_fluff(text: str) -> bool:
-    """Return True if the text still contains typical engagement-bait phrases."""
+    """Quick check for any remaining social‑media bait."""
     fluff = [
         "comments below", "let us know", "subscribe", "like and share",
         "follow me on", "click here", "what do you think"
@@ -71,53 +76,11 @@ def contains_comment_fluff(text: str) -> bool:
     lower = text.lower()
     return any(phrase in lower for phrase in fluff)
 
-# ---------- Core Functions ----------
-
-def img2text(image: Image.Image) -> str:
-    captioner = load_image_caption_model()
-    return captioner(image)[0]["generated_text"]
-
-def text2story(caption: str) -> str:
-    """
-    Generate a 50-100 word kid-friendly story from a caption.
-    Uses GPT-2 in a continuation style, similar to the classroom example.
-    Falls back to a second attempt if the first output is poor.
-    """
-    generator = load_story_generator_model()
-    
-    # Classroom-style prompt: just give the story beginning
-    prompt = f"Once upon a time, there was {caption.lower()}. "
-    
-    gen_kwargs = {
-        "max_new_tokens": 120,
-        "temperature": 0.9,
-        "pad_token_id": generator.tokenizer.eos_token_id,
-        "do_sample": True,
-        "top_k": 50,
-        "top_p": 0.9,
-        "repetition_penalty": 1.2
-    }
-    
-    max_attempts = 2
-    story = ""
-    for attempt in range(max_attempts):
-        raw = generator(prompt, **gen_kwargs)[0]["generated_text"]
-        story = raw[len(prompt):].strip()
-        story = clean_story_text(story)
-        # Quality check: at least 30 words and no comment fluff
-        if len(story.split()) >= 30 and not contains_comment_fluff(story):
-            break
-        # If not good enough, increase temperature for more variety next try
-        gen_kwargs["temperature"] += 0.2
-    
-    # Trim to a reasonable number of complete sentences
-    story = trim_story_to_sentence_range(story, min_words=30, max_words=110)
-    # Fix capitalization
-    story = normalize_capitalization(story)
-    return story
-
 def trim_story_to_sentence_range(text: str, min_words: int = 30, max_words: int = 110) -> str:
-    """Keep only whole sentences until max_words is reached."""
+    """
+    Keep only whole sentences until the word count reaches max_words.
+    If the result is still too short, add one extra sentence.
+    """
     sentences = re.split(r'(?<=[.!?])\s+', text)
     result = ""
     wc = 0
@@ -127,17 +90,65 @@ def trim_story_to_sentence_range(text: str, min_words: int = 30, max_words: int 
             break
         result += sent + " "
         wc += words
-    # If too short, try adding one more sentence even if it exceeds slightly
+
     if wc < min_words and len(sentences) > len(result.split('. ')):
-        for sent in sentences[len(result.split('. ')):]:
+        remaining = sentences[len(result.split('. ')):]
+        for sent in remaining:
             words = len(sent.split())
-            if wc + words > max_words + 20:
+            if wc + words > max_words + 20:   # soft overflow allowed
                 break
             result += sent + " "
             wc += words
     return result.strip()
 
+# ---------- Core Functions ----------
+
+def img2text(image: Image.Image) -> str:
+    """Generate a caption describing the uploaded image."""
+    captioner = load_image_caption_model()
+    return captioner(image)[0]["generated_text"]
+
+def text2story(caption: str) -> str:
+    """
+    Turn a caption into a short, child‑friendly story (50‑100 words).
+    The fine‑tuned child‑story model produces safe output, so no
+    additional content filtering is required.
+    """
+    generator = load_story_generator_model()
+
+    # Simple prompt – the model already understands how to tell a story
+    prompt = f"Once upon a time, {caption.lower()}."
+
+    gen_kwargs = {
+        "max_new_tokens": 90,
+        "temperature": 0.85,
+        "pad_token_id": generator.tokenizer.eos_token_id,
+        "do_sample": True,
+        "top_k": 50,
+        "top_p": 0.9,
+        "repetition_penalty": 1.2
+    }
+
+    # Try twice; if the first attempt yields something too short or
+    # contains comment‑like fluff, increase temperature and try again.
+    max_attempts = 2
+    story = ""
+    for attempt in range(max_attempts):
+        raw = generator(prompt, **gen_kwargs)[0]["generated_text"]
+        story = raw[len(prompt):].strip()
+        story = clean_story_text(story)
+
+        if len(story.split()) >= 30 and not contains_comment_fluff(story):
+            break
+        gen_kwargs["temperature"] += 0.2
+
+    # Trim to a nice sentence range and fix capitalization
+    story = trim_story_to_sentence_range(story, min_words=30, max_words=110)
+    story = normalize_capitalization(story)
+    return story
+
 def text2audio(story_text: str) -> str:
+    """Convert the story to speech and return the path to an MP3 file."""
     tts = gTTS(story_text, lang="en")
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
         tts.save(fp.name)
@@ -151,7 +162,9 @@ def main():
     st.markdown("**A fun way to turn any picture into a story!** 🌟")
     st.write("Upload an image, and I'll tell you a magical story!")
 
-    uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
+    uploaded_file = st.file_uploader(
+        "Choose an image...", type=["jpg", "jpeg", "png"]
+    )
 
     if uploaded_file is not None:
         image = Image.open(uploaded_file).convert("RGB")
