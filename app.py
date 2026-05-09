@@ -3,8 +3,7 @@ Storytelling Application for Kids (Ages 3-10)
 =============================================
 - Upload an image.
 - Generate a caption using BLIP image-to-text.
-- Expand the caption into a ~150-word story by letting distilgpt2
-  continue a simple fairy-tale opening (teacher's classroom method).
+- Expand the caption into a 50-100 word children's story with GPT-2.
 - Convert the story to speech with gTTS.
 """
 
@@ -17,6 +16,7 @@ from transformers import pipeline
 from PIL import Image
 from gtts import gTTS
 import tempfile
+import re
 
 # ---------- Model Caching ----------
 
@@ -27,30 +27,54 @@ def load_image_caption_model():
 
 @st.cache_resource
 def load_story_generator_model():
-    """Load distilgpt2 for story generation."""
-    return pipeline("text-generation", model="distilgpt2")
+    """Load GPT-2 for story generation (same as teacher's demo)."""
+    return pipeline("text-generation", model="gpt2")
+
+# ---------- Simple text helpers ----------
+
+def clean_story_text(text:str) -> str:
+    """Remove occasional social media/comment fluff."""
+    # Remove phrases like "This is what we have seen from this photo!", "It's amazing how awesome it looks..."
+    text = re.sub(r"(?i)(this is what we have seen|it['’]?s amazing how awesome it looks|subscribe|follow me|check out|click here|let us know in the comments).*?[.!?]", "", text)
+    # Remove URLs
+    text = re.sub(r"http\S+", "", text)
+    # Remove extra whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+def trim_to_sentence_range(text:str, min_words=30, max_words=110) -> str:
+    """Keep only complete sentences up to ~100 words."""
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    result = ""
+    word_count = 0
+    for sent in sentences:
+        words = len(sent.split())
+        if word_count + words > max_words:
+            break
+        result += sent + " "
+        word_count += words
+    return result.strip()
 
 # ---------- Core Functions ----------
 
-def img2text(image: Image.Image) -> str:
+def img2text(image:Image.Image) -> str:
     """Generate a descriptive caption from the uploaded image."""
     captioner = load_image_caption_model()
     return captioner(image)[0]["generated_text"]
 
-def text2story(caption: str) -> str:
+def text2story(caption:str) -> str:
     """
-    Expand the caption into a ~150-word children's story.
-    Uses a simple fairy-tale opening so the model naturally continues
-    with a story — just like the classroom demonstration.
+    Turn the caption into a 50-100 word children's story.
+    Uses a simple fairy-tale opening that GPT-2 will naturally continue.
     """
     generator = load_story_generator_model()
 
-    # Simple opening – the model will continue from here
+    # A clean story opening — the model will continue from here.
     prompt = f"Once upon a time, there was {caption}."
 
-    result = generator(
+    raw = generator(
         prompt,
-        max_new_tokens=200,           # enough room for ~150 words
+        max_new_tokens=150,          # enough for ~100 words
         temperature=0.85,
         pad_token_id=generator.tokenizer.eos_token_id,
         do_sample=True,
@@ -59,17 +83,25 @@ def text2story(caption: str) -> str:
         repetition_penalty=1.2
     )[0]["generated_text"]
 
-    # Return the entire story (opening + continuation)
-    return result.strip()
+    # Extract the whole story (opening + continuation)
+    story = raw.strip()
 
-def text2audio(story_text: str) -> str:
-    """Convert story text to speech and return path to temporary MP3 file."""
+    # Light cleanup: remove occasional social-media phrases
+    story = clean_story_text(story)
+
+    # Trim to 50-100 words, keeping whole sentences
+    story = trim_to_sentence_range(story, min_words=50, max_words=100)
+
+    return story
+
+def text2audio(story_text:str) -> str:
+    """Convert story text to speech and return path to MP3."""
     tts = gTTS(story_text, lang="en")
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
         tts.save(fp.name)
         return fp.name
 
-# ---------- Streamlit User Interface ----------
+# ---------- Streamlit UI ----------
 
 def main():
     st.set_page_config(page_title="Magic Storyteller", page_icon="📖")
@@ -77,25 +109,21 @@ def main():
     st.markdown("**A fun way to turn any picture into a story!** 🌟")
     st.write("Upload an image, and I'll tell you a magical story!")
 
-    uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
+    uploaded_file = st.file_uploader("Choose an image...", type=["jpg","jpeg","png"])
 
     if uploaded_file is not None:
-        # Display uploaded image
         image = Image.open(uploaded_file).convert("RGB")
         st.image(image, caption="Your Picture", use_container_width=True)
 
         with st.spinner("✨ Creating your story... This may take a few seconds."):
-            # Step 1: Image → Caption
             caption = img2text(image)
             st.subheader("📝 What I See")
             st.write(caption)
 
-            # Step 2: Caption → Story
             story = text2story(caption)
             st.subheader("📚 Your Story")
             st.write(story)
 
-            # Step 3: Story → Audio
             audio_file = text2audio(story)
             st.subheader("🔊 Listen to Your Story")
             st.audio(audio_file, format="audio/mp3")
