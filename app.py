@@ -2,7 +2,7 @@
 Storytelling Application for Kids (Ages 3-10)
 =============================================
 - Upload an image
-- Generate a caption using BLIP (Salesforce/blip-image-captioning-base)
+- Generate a caption using BLIP (image-to-text)
 - Expand the caption into a 50–100 word children's story with distilgpt2
 - Uses teacher's continuation method + multi-candidate selection
 - Converts the story to speech with gTTS
@@ -23,26 +23,31 @@ import re
 
 @st.cache_resource
 def load_image_caption_model():
-    """Load BLIP image captioning model (as recommended by the assignment)."""
+    """Load BLIP image captioning model."""
     return pipeline("image-to-text", model="Salesforce/blip-image-captioning-base")
 
 @st.cache_resource
 def load_story_generator_model():
-    """Load distilgpt2 – lightweight and exactly what the skeleton specified."""
+    """Load distilgpt2 for story generation (as in assignment skeleton)."""
     return pipeline("text-generation", model="distilgpt2")
 
-# ---------- Simple text helpers ----------
+# ---------- Strict sentence filter ----------
 
-def is_clean_sentence(text: str) -> bool:
+def is_good_story_sentence(sent: str) -> bool:
     """
-    Return False if the text looks like leftover social media fluff,
-    article clippings, or random punctuation fragments.
+    Keep only sentences that look like they belong in a children's story.
+    Discard first-person narration, social media fluff, and obvious non-fiction.
     """
-    lower = text.lower()
-    # Common garbage patterns from distilgpt2
-    garbage_patterns = [
-        r"stuff$",                     # lines that just end with "Stuff"
-        r"it's just that",            # typical blog/comment phrasing
+    lower = sent.lower().strip()
+    
+    # Must contain at least 3 words
+    if len(lower.split()) < 3:
+        return False
+
+    # Discard obvious junk patterns (blog, comments, meta talk)
+    junk_patterns = [
+        r"stuff$",
+        r"it's just that",
         r"that's right",
         r"check out",
         r"subscribe",
@@ -52,25 +57,36 @@ def is_clean_sentence(text: str) -> bool:
         r"i made my first",
         r"re[- ]released",
         r"click here",
+        r"this is where i began",
+        r"when i was",
+        r"i remember",
+        r"i thought",
+        r"i decided",
+        r"my family",
+        r"our favourite",
+        r"that’s why",
+        r"you can see",
+        r"you won't believe",
+        r"here's why",
     ]
-    for pat in garbage_patterns:
+    for pat in junk_patterns:
         if re.search(pat, lower):
             return False
-    # Also discard very short sentences (< 3 words) that are likely noise
-    if len(text.split()) < 3:
+
+    # Reject sentences that start with "This is ..." (often non-story)
+    if re.match(r"this is", lower):
         return False
+
     return True
 
 def trim_story(text: str, max_words: int = 110) -> str:
-    """
-    Keep only complete, clean sentences up to ~100 words.
-    """
+    """Keep only clean, story-like sentences up to ~100 words."""
     raw_sentences = re.split(r'(?<=[.!?])\s+', text)
-    clean_sentences = [s.strip() for s in raw_sentences if is_clean_sentence(s.strip())]
+    good_sentences = [s.strip() for s in raw_sentences if is_good_story_sentence(s.strip())]
     
     result = ""
     wc = 0
-    for sent in clean_sentences:
+    for sent in good_sentences:
         words = len(sent.split())
         if wc + words > max_words:
             break
@@ -79,14 +95,10 @@ def trim_story(text: str, max_words: int = 110) -> str:
     return result.strip()
 
 def story_candidate_score(text: str) -> int:
-    """
-    Score a candidate story. Higher = better.
-    - 40‑110 words: +2
-    - Ends with . ! or ?: +1
-    """
+    """Score a candidate story: length + ending punctuation."""
     score = 0
-    word_count = len(text.split())
-    if 40 <= word_count <= 110:
+    wc = len(text.split())
+    if 40 <= wc <= 110:
         score += 2
     if text and text[-1] in ".!?":
         score += 1
@@ -99,14 +111,10 @@ def img2text(image: Image.Image) -> str:
     return captioner(image)[0]["generated_text"]
 
 def text2story(caption: str) -> str:
-    """
-    Generate 3 story continuations from distilgpt2 using the teacher's
-    minimal-prompt method, then pick the best one.
-    """
+    """Generate 3 story continuations and pick the best one."""
     generator = load_story_generator_model()
     prompt = f"Once upon a time, there was {caption}."
 
-    # Generate 3 candidates
     results = generator(
         prompt,
         max_new_tokens=150,
@@ -124,7 +132,6 @@ def text2story(caption: str) -> str:
 
     for r in results:
         full_text = r["generated_text"].strip()
-        # Trim to clean, complete sentences
         trimmed = trim_story(full_text, 100)
         if not trimmed:
             continue
