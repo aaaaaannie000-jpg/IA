@@ -1,14 +1,4 @@
-"""
-Storytelling Application for Kids (Ages 3-10)
-=============================================
-- Users upload an image.
-- The app generates a caption using an image-to-text model.
-- The caption is expanded into a 50-100 word story for children.
-- The story is converted to speech and can be played directly.
-"""
-
 import os
-# Suppress Hugging Face download progress bars and verbose logs
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 
@@ -20,96 +10,86 @@ import tempfile
 import re
 
 # ---------- Model Loading with Streamlit Caching ----------
-# Models are cached to avoid re-downloading on every interaction.
 
 @st.cache_resource
 def load_image_caption_model():
-    """Load the image captioning model."""
     return pipeline(model="Salesforce/blip-image-captioning-base")
 
 @st.cache_resource
 def load_story_generator_model():
-    """Load the text generation model.
-    Uses 'distilgpt2' for smaller footprint; upgrade to 'gpt2' if resources allow.
-    """
     return pipeline(model="distilgpt2")
 
 # ---------- Core Functions ----------
 
 def img2text(image: Image.Image) -> str:
-    """
-    Generate a descriptive caption from an uploaded image.
-
-    Args:
-        image (PIL.Image): The input image in RGB format.
-
-    Returns:
-        str: The generated caption.
-    """
     captioner = load_image_caption_model()
     return captioner(image)[0]["generated_text"]
 
-def text2story(caption: str) -> str:
-    """
-    Expand a caption into a short, fun story for children (50-100 words).
+def clean_story_text(text: str) -> str:
+    text = re.sub(r"(?i)(follow\s*(me|us)\s*on\s*\S+|let\s*us\s*know\s*in\s*the\s*comments\s*below|subscribe\s*to\s*our\s*channel|click\s*here|like\s*and\s*share).*?\.", "", text)
+    text = re.sub(r"http\S+", "", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
 
-    Uses a carefully crafted prompt and post-processing to improve story quality.
+def contains_comment_fluff(text: str) -> bool:
+    fluff = ["comments below", "let us know", "subscribe", "like and share",
+             "follow me on", "click here", "what do you think"]
+    lower = text.lower()
+    return any(phrase in lower for phrase in fluff)
 
-    Args:
-        caption (str): The image caption.
-
-    Returns:
-        str: A cleaned, child-friendly story.
-    """
-    generator = load_story_generator_model()
-    
-    # Build a kid-friendly prompt that guides the model to tell a story
-    prompt = f"Once upon a time, there was {caption.lower()}.\nA little story for kids:"
-    
-    result = generator(
-        prompt,
-        max_new_tokens=100,
-        temperature=0.9,
-        pad_token_id=generator.tokenizer.eos_token_id,
-        do_sample=True,
-        top_k=50,
-        top_p=0.9,
-        repetition_penalty=1.15
-    )[0]["generated_text"]
-    
-    # Extract only the generated part (remove the prompt)
-    story = result[len(prompt):].strip()
-    
-    # Post-processing: trim to complete sentences and keep roughly 50-100 words
-    sentences = re.split(r'(?<=[.!?])\s+', story)
-    clean_story = ""
-    word_count = 0
-    
+def trim_story_to_sentence_range(text: str, min_words: int = 30, max_words: int = 110) -> str:
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    result = ""
+    wc = 0
     for sent in sentences:
-        words = len(sent.split())
-        if word_count + words > 110:   # soft cap to avoid abrupt cut-off
+        words_count = len(sent.split())
+        if wc + words_count > max_words:
             break
-        clean_story += sent + " "
-        word_count += words
-    
-    return clean_story.strip()
+        result += sent + " "
+        wc += words_count
+    if wc < min_words and len(sentences) > len(result.split('.')) - 1:
+        for sent in sentences[len(result.split('.')) - 1:]:
+            words_count = len(sent.split())
+            if wc + words_count > max_words + 20:
+                break
+            result += sent + " "
+            wc += words_count
+    return result.strip()
+
+def text2story(caption: str) -> str:
+    generator = load_story_generator_model()
+    prompt = (
+        f"Write a short, fun story for kids (50-100 words) based on this scene: {caption.lower()}.\n"
+        "Once upon a time,"
+    )
+    gen_kwargs = {
+        "max_new_tokens": 120,
+        "temperature": 0.9,
+        "pad_token_id": generator.tokenizer.eos_token_id,
+        "do_sample": True,
+        "top_k": 50,
+        "top_p": 0.9,
+        "repetition_penalty": 1.2
+    }
+    max_attempts = 2
+    for attempt in range(max_attempts):
+        raw = generator(prompt, **gen_kwargs)[0]["generated_text"]
+        story = raw[len(prompt):].strip()
+        story = clean_story_text(story)
+        word_list = story.split()
+        if len(word_list) >= 30 and not contains_comment_fluff(story):
+            return trim_story_to_sentence_range(story)
+        gen_kwargs["temperature"] += 0.2
+    return trim_story_to_sentence_range(story, min_words=0)
 
 def text2audio(story_text: str) -> str:
-    """
-    Convert story text to speech using gTTS and save as a temporary MP3 file.
-
-    Args:
-        story_text (str): The story.
-
-    Returns:
-        str: File path to the temporary audio file.
-    """
     tts = gTTS(story_text, lang="en")
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
         tts.save(fp.name)
         return fp.name
 
-# ---------- Streamlit User Interface ----------
+# ---------- Streamlit UI ----------
 
 def main():
     st.set_page_config(page_title="Magic Storyteller", page_icon="📖")
@@ -117,28 +97,21 @@ def main():
     st.markdown("**A fun way to turn any picture into a story!** 🌟")
     st.write("Upload an image, and I'll tell you a magical story!")
 
-    uploaded_file = st.file_uploader(
-        "Choose an image...", type=["jpg", "jpeg", "png"]
-    )
+    uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
 
     if uploaded_file is not None:
-        # Display the uploaded image
         image = Image.open(uploaded_file).convert("RGB")
         st.image(image, caption="Your Picture", use_container_width=True)
 
-        # Processing steps
         with st.spinner("✨ Creating your story... This may take a few seconds."):
-            # 1. Image → caption
             caption = img2text(image)
             st.subheader("📝 What I See")
             st.write(caption)
 
-            # 2. Caption → story
             story = text2story(caption)
             st.subheader("📚 Your Story")
             st.write(story)
 
-            # 3. Story → audio
             audio_file = text2audio(story)
             st.subheader("🔊 Listen to Your Story")
             st.audio(audio_file, format="audio/mp3")
