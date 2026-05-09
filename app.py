@@ -2,10 +2,10 @@
 Storytelling Application for Kids (Ages 3-10)
 =============================================
 - Upload an image
-- Generate a caption using BLIP (image-to-text)
-- Expand the caption into a 50–100 word children's story with distilgpt2
-- Uses teacher's continuation method + multi-candidate selection
-- Converts the story to speech with gTTS
+- Generate a caption with BLIP (image-to-text)
+- Generate two story versions with distilgpt2
+- Use sentiment analysis to select the more positive story
+- Convert the story to speech with gTTS
 """
 
 import os
@@ -28,81 +28,29 @@ def load_image_caption_model():
 
 @st.cache_resource
 def load_story_generator_model():
-    """Load distilgpt2 for story generation (as in assignment skeleton)."""
+    """Load distilgpt2 for story generation."""
     return pipeline("text-generation", model="distilgpt2")
 
-# ---------- Strict sentence filter ----------
+@st.cache_resource
+def load_sentiment_model():
+    """Load sentiment analysis model (same as class example)."""
+    return pipeline("sentiment-analysis",
+                    model="distilbert/distilbert-base-uncased-finetuned-sst-2-english")
 
-def is_good_story_sentence(sent: str) -> bool:
-    """
-    Keep only sentences that look like they belong in a children's story.
-    Discard first-person narration, social media fluff, and obvious non-fiction.
-    """
-    lower = sent.lower().strip()
-    
-    # Must contain at least 3 words
-    if len(lower.split()) < 3:
-        return False
+# ---------- Helper to trim story to 50-100 words ----------
 
-    # Discard obvious junk patterns (blog, comments, meta talk)
-    junk_patterns = [
-        r"stuff$",
-        r"it's just that",
-        r"that's right",
-        r"check out",
-        r"subscribe",
-        r"follow me",
-        r"let us know",
-        r"what do you think",
-        r"i made my first",
-        r"re[- ]released",
-        r"click here",
-        r"this is where i began",
-        r"when i was",
-        r"i remember",
-        r"i thought",
-        r"i decided",
-        r"my family",
-        r"our favourite",
-        r"that’s why",
-        r"you can see",
-        r"you won't believe",
-        r"here's why",
-    ]
-    for pat in junk_patterns:
-        if re.search(pat, lower):
-            return False
-
-    # Reject sentences that start with "This is ..." (often non-story)
-    if re.match(r"this is", lower):
-        return False
-
-    return True
-
-def trim_story(text: str, max_words: int = 110) -> str:
-    """Keep only clean, story-like sentences up to ~100 words."""
-    raw_sentences = re.split(r'(?<=[.!?])\s+', text)
-    good_sentences = [s.strip() for s in raw_sentences if is_good_story_sentence(s.strip())]
-    
+def trim_to_sentence_range(text: str, min_words=30, max_words=110) -> str:
+    """Keep complete sentences up to ~100 words."""
+    sentences = re.split(r'(?<=[.!?])\s+', text)
     result = ""
     wc = 0
-    for sent in good_sentences:
+    for sent in sentences:
         words = len(sent.split())
         if wc + words > max_words:
             break
         result += sent + " "
         wc += words
     return result.strip()
-
-def story_candidate_score(text: str) -> int:
-    """Score a candidate story: length + ending punctuation."""
-    score = 0
-    wc = len(text.split())
-    if 40 <= wc <= 110:
-        score += 2
-    if text and text[-1] in ".!?":
-        score += 1
-    return score
 
 # ---------- Core Functions ----------
 
@@ -111,39 +59,48 @@ def img2text(image: Image.Image) -> str:
     return captioner(image)[0]["generated_text"]
 
 def text2story(caption: str) -> str:
-    """Generate 3 story continuations and pick the best one."""
+    """
+    Generate two story continuations, then use sentiment analysis
+    to pick the more positive one (teacher's method).
+    """
     generator = load_story_generator_model()
-    prompt = f"Once upon a time, there was {caption}."
+    sentiment = load_sentiment_model()
 
-    results = generator(
-        prompt,
-        max_new_tokens=150,
-        temperature=0.85,
-        pad_token_id=generator.tokenizer.eos_token_id,
-        do_sample=True,
-        top_k=50,
-        top_p=0.9,
-        repetition_penalty=1.2,
-        num_return_sequences=3
-    )
+    # Simple opening – the model will continue from here
+    prompt = f"Once upon a time, {caption}."
 
-    best_story = ""
-    best_score = -999
+    # Generate two story candidates
+    story1 = generator(prompt, max_new_tokens=150, temperature=0.85,
+                       pad_token_id=generator.tokenizer.eos_token_id,
+                       do_sample=True, top_k=50, top_p=0.9,
+                       repetition_penalty=1.2,
+                       num_return_sequences=1)[0]["generated_text"]
+    story2 = generator(prompt, max_new_tokens=150, temperature=0.85,
+                       pad_token_id=generator.tokenizer.eos_token_id,
+                       do_sample=True, top_k=50, top_p=0.9,
+                       repetition_penalty=1.2,
+                       num_return_sequences=1)[0]["generated_text"]
 
-    for r in results:
-        full_text = r["generated_text"].strip()
-        trimmed = trim_story(full_text, 100)
-        if not trimmed:
-            continue
-        s = story_candidate_score(trimmed)
-        if s > best_score:
-            best_score = s
-            best_story = trimmed
+    # Sentiment analysis
+    result1 = sentiment(story1)[0]
+    result2 = sentiment(story2)[0]
 
-    if not best_story:
-        best_story = f"Once upon a time, there was {caption}. They lived happily ever after. The end."
+    # Choose the more positive story (teacher's logic)
+    if result1["label"] == "POSITIVE" and result2["label"] != "POSITIVE":
+        chosen = story1
+    elif result2["label"] == "POSITIVE" and result1["label"] != "POSITIVE":
+        chosen = story2
+    elif result1["label"] == "POSITIVE" and result2["label"] == "POSITIVE":
+        if result1["score"] >= result2["score"]:
+            chosen = story1
+        else:
+            chosen = story2
+    else:
+        # If both negative, just pick the first one (fallback)
+        chosen = story1
 
-    return best_story
+    # Trim to complete sentences within ~100 words
+    return trim_to_sentence_range(chosen, min_words=30, max_words=110)
 
 def text2audio(story_text: str) -> str:
     tts = gTTS(story_text, lang="en")
