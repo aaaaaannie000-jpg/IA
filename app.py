@@ -1,3 +1,3 @@
 import streamlit as st
 
-st.writes("ISOM5240")
+st.write("ISOM5240")
