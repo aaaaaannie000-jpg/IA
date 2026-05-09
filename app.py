@@ -3,9 +3,9 @@ Storytelling Application for Kids (Ages 3-10)
 =============================================
 - Upload an image
 - Generate a caption with BLIP (image-to-text)
-- Generate two story versions with distilgpt2
+- Generate two story continuations with GPT-2
 - Use sentiment analysis to select the more positive story
-- Convert the story to speech with gTTS
+- Trim to 50-100 words and convert to speech
 """
 
 import os
@@ -28,8 +28,8 @@ def load_image_caption_model():
 
 @st.cache_resource
 def load_story_generator_model():
-    """Load distilgpt2 for story generation."""
-    return pipeline("text-generation", model="distilgpt2")
+    """Load GPT-2 (same as teacher's default) for reliable story generation."""
+    return pipeline("text-generation", model="gpt2")
 
 @st.cache_resource
 def load_sentiment_model():
@@ -37,10 +37,10 @@ def load_sentiment_model():
     return pipeline("sentiment-analysis",
                     model="distilbert/distilbert-base-uncased-finetuned-sst-2-english")
 
-# ---------- Helper to trim story to 50-100 words ----------
+# ---------- Helper ----------
 
 def trim_to_sentence_range(text: str, min_words=30, max_words=110) -> str:
-    """Keep complete sentences up to ~100 words."""
+    """Keep the first few complete sentences up to ~100 words."""
     sentences = re.split(r'(?<=[.!?])\s+', text)
     result = ""
     wc = 0
@@ -66,40 +66,35 @@ def text2story(caption: str) -> str:
     generator = load_story_generator_model()
     sentiment = load_sentiment_model()
 
-    # Simple opening – the model will continue from here
+    # Simple fairy-tale opening – GPT-2 continues naturally
     prompt = f"Once upon a time, {caption}."
 
-    # Generate two story candidates
+    # Generate two candidates
     story1 = generator(prompt, max_new_tokens=150, temperature=0.85,
                        pad_token_id=generator.tokenizer.eos_token_id,
                        do_sample=True, top_k=50, top_p=0.9,
-                       repetition_penalty=1.2,
-                       num_return_sequences=1)[0]["generated_text"]
+                       repetition_penalty=1.2)[0]["generated_text"]
+    
     story2 = generator(prompt, max_new_tokens=150, temperature=0.85,
                        pad_token_id=generator.tokenizer.eos_token_id,
                        do_sample=True, top_k=50, top_p=0.9,
-                       repetition_penalty=1.2,
-                       num_return_sequences=1)[0]["generated_text"]
+                       repetition_penalty=1.2)[0]["generated_text"]
 
-    # Sentiment analysis
-    result1 = sentiment(story1)[0]
-    result2 = sentiment(story2)[0]
+    # Get sentiment
+    res1 = sentiment(story1)[0]
+    res2 = sentiment(story2)[0]
 
     # Choose the more positive story (teacher's logic)
-    if result1["label"] == "POSITIVE" and result2["label"] != "POSITIVE":
+    if res1["label"] == "POSITIVE" and res2["label"] != "POSITIVE":
         chosen = story1
-    elif result2["label"] == "POSITIVE" and result1["label"] != "POSITIVE":
+    elif res2["label"] == "POSITIVE" and res1["label"] != "POSITIVE":
         chosen = story2
-    elif result1["label"] == "POSITIVE" and result2["label"] == "POSITIVE":
-        if result1["score"] >= result2["score"]:
-            chosen = story1
-        else:
-            chosen = story2
+    elif res1["label"] == "POSITIVE" and res2["label"] == "POSITIVE":
+        chosen = story1 if res1["score"] >= res2["score"] else story2
     else:
-        # If both negative, just pick the first one (fallback)
-        chosen = story1
+        chosen = story1  # fallback
 
-    # Trim to complete sentences within ~100 words
+    # Trim to ~100 words, keeping complete sentences
     return trim_to_sentence_range(chosen, min_words=30, max_words=110)
 
 def text2audio(story_text: str) -> str:
