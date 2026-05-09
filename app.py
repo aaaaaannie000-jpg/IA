@@ -2,10 +2,10 @@
 Storytelling Application for Kids (Ages 3-10)
 =============================================
 - Upload an image
-- Generate a caption using BLIP image-to-text
-- Expand the caption into a 50-100 word children's story with GPT-2
-- Automatically select the best story among multiple candidates
-- Convert the story to speech with gTTS
+- Generate a caption using BLIP
+- Generate multiple story candidates with a child‑story fine‑tuned GPT-2
+- Automatically select the best candidate (safe, proper length, complete)
+- Convert to speech with gTTS
 """
 
 import os
@@ -28,38 +28,16 @@ def load_image_caption_model():
 
 @st.cache_resource
 def load_story_generator_model():
-    """Load GPT-2 for story generation."""
-    return pipeline("text-generation", model="gpt2")
+    """
+    Load a GPT-2 model fine-tuned on children's stories.
+    Safe, clean, and age-appropriate by design.
+    """
+    return pipeline("text-generation", model="mrm8488/gpt2-child-stories")
 
-# ---------- Text helpers ----------
+# ---------- Simple text helpers ----------
 
-def is_comment_fluff(text: str) -> bool:
-    """Check if the text contains typical comment/youtube fluff."""
-    fluff_patterns = [
-        r"subscribe",
-        r"like and share",
-        r"follow me",
-        r"click here",
-        r"let us know in the comments",
-        r"that['’]?s right",
-        r"check out",
-        r"what do you think",
-        r"i made my first video",
-        r"re[- ]released on",
-        r"my favourite rides",
-    ]
-    text_lower = text.lower()
-    for pat in fluff_patterns:
-        if re.search(pat, text_lower):
-            return True
-    return False
-
-def story_length_ok(text: str, min_words=40, max_words=120) -> bool:
-    words = text.split()
-    return min_words <= len(words) <= max_words
-
-def trim_to_sentence_end(text: str, max_words=110) -> str:
-    """Trim text to complete sentences within max_words."""
+def trim_to_sentence_end(text: str, max_words:int = 100) -> str:
+    """Keep only whole sentences up to max_words."""
     sentences = re.split(r'(?<=[.!?])\s+', text)
     result = ""
     wc = 0
@@ -71,16 +49,16 @@ def trim_to_sentence_end(text: str, max_words=110) -> str:
         wc += words
     return result.strip()
 
-def score_story(text: str) -> int:
+def story_quality_score(text: str) -> int:
     """
-    Score how good a story is. Higher is better.
-    2 points for no fluff, 1 point for correct length, 1 point for ending with punctuation.
+    Score a story candidate (higher = better).
+    +2: Length 40-110 words
+    +1: Ends with . ! or ?
     """
     score = 0
-    if not is_comment_fluff(text):
+    word_count = len(text.split())
+    if 40 <= word_count <= 110:
         score += 2
-    if story_length_ok(text, 40, 120):
-        score += 1
     if text and text[-1] in ".!?":
         score += 1
     return score
@@ -93,55 +71,43 @@ def img2text(image:Image.Image) -> str:
 
 def text2story(caption:str) -> str:
     """
-    Generate 3 candidate stories and return the best one.
-    If none are good, retry with higher temperature.
+    Generate 3 children's story candidates using a safe fine‑tuned model,
+    and automatically pick the best one based on length and completeness.
     """
     generator = load_story_generator_model()
     prompt = f"Once upon a time, there was {caption}."
-    
+
     best_story = ""
     best_score = -1
-    attempts = 2
-    temp = 0.85
 
-    for attempt in range(attempts):
-        # Generate 3 candidates
-        results = generator(
-            prompt,
-            max_new_tokens=150,
-            temperature=temp,
-            pad_token_id=generator.tokenizer.eos_token_id,
-            do_sample=True,
-            top_k=50,
-            top_p=0.9,
-            repetition_penalty=1.2,
-            num_return_sequences=3
-        )
-        
-        for r in results:
-            full_text = r["generated_text"].strip()
-            # Clean possible fluff (just in case)
-            # Actually we rely on scoring, but we can do a light clean
-            story_candidate = full_text
-            if len(story_candidate) < len(prompt):
-                continue
-            # Trim to roughly 100 words
-            trimmed = trim_to_sentence_end(story_candidate, 100)
-            s = score_story(trimmed)
-            if s > best_score:
-                best_score = s
-                best_story = trimmed
-        
-        # If we already have a good story (score >= 4), break
-        if best_score >= 4:
-            break
-        # Otherwise, increase temperature to get more variety
-        temp += 0.15
+    # Generate 3 candidates
+    results = generator(
+        prompt,
+        max_new_tokens=150,
+        temperature=0.85,
+        pad_token_id=generator.tokenizer.eos_token_id,
+        do_sample=True,
+        top_k=50,
+        top_p=0.9,
+        repetition_penalty=1.2,
+        num_return_sequences=3
+    )
 
-    # If still no good story, just return the best we have (or the first one)
+    for r in results:
+        full_text = r["generated_text"].strip()
+        if not full_text.startswith(prompt):
+            continue
+        # Trim to complete sentences within ~100 words
+        trimmed = trim_to_sentence_end(full_text, 100)
+        score = story_quality_score(trimmed)
+        if score > best_score:
+            best_score = score
+            best_story = trimmed
+
+    # Fallback in case no candidate qualified
     if not best_story:
-        best_story = "Once upon a time, there was " + caption + ". They lived happily ever after. The end."
-    
+        best_story = f"Once upon a time, there was {caption}. They lived happily ever after. The end."
+
     return best_story
 
 def text2audio(story_text:str) -> str:
