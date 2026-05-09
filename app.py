@@ -3,9 +3,9 @@ Storytelling Application for Kids (Ages 3-10)
 =============================================
 - Upload an image
 - Generate a caption using BLIP
-- Generate multiple story candidates with a child‑story fine‑tuned GPT-2
-- Automatically select the best candidate (safe, proper length, complete)
-- Convert to speech with gTTS
+- Expand the caption into a 50‑100 word children's story with GPT-2
+- Automatically pick the best (safe, complete) candidate
+- Convert the story to speech with gTTS
 """
 
 import os
@@ -28,15 +28,24 @@ def load_image_caption_model():
 
 @st.cache_resource
 def load_story_generator_model():
-    """
-    Load a GPT-2 model fine-tuned on children's stories.
-    Safe, clean, and age-appropriate by design.
-    """
-    return pipeline("text-generation", model="mrm8488/gpt2-child-stories")
+    """Load GPT-2 for story generation (most stable on Streamlit Cloud)."""
+    return pipeline("text-generation", model="gpt2")
 
-# ---------- Simple text helpers ----------
+# ---------- Simple Text Helpers ----------
 
-def trim_to_sentence_end(text: str, max_words:int = 100) -> str:
+# Very small list of words that must NOT appear in a children's story
+UNSAFE_WORDS = [
+    "kill", "axe", "gun", "knife", "blood", "murder",
+    "sex", "nude", "naked", "porn", "drug", "alcohol",
+    "rape", "suicide", "dead", "death", "bomb"
+]
+
+def is_safe(text: str) -> bool:
+    """Return True if the text does not contain any unsafe word."""
+    words = set(re.findall(r'\b\w+\b', text.lower()))
+    return not words.intersection(UNSAFE_WORDS)
+
+def trim_to_complete_sentences(text: str, max_words: int = 110) -> str:
     """Keep only whole sentences up to max_words."""
     sentences = re.split(r'(?<=[.!?])\s+', text)
     result = ""
@@ -49,11 +58,12 @@ def trim_to_sentence_end(text: str, max_words:int = 100) -> str:
         wc += words
     return result.strip()
 
-def story_quality_score(text: str) -> int:
+def story_candidate_score(text: str) -> int:
     """
-    Score a story candidate (higher = better).
-    +2: Length 40-110 words
-    +1: Ends with . ! or ?
+    Score a story candidate. Higher is better.
+    - Length 40‑110 words: +2 points
+    - Ends with . ! or ?: +1 point
+    - Contains unsafe word: -100 points (disqualified)
     """
     score = 0
     word_count = len(text.split())
@@ -61,24 +71,27 @@ def story_quality_score(text: str) -> int:
         score += 2
     if text and text[-1] in ".!?":
         score += 1
+    if not is_safe(text):
+        score -= 100
     return score
 
 # ---------- Core Functions ----------
 
-def img2text(image:Image.Image) -> str:
+def img2text(image: Image.Image) -> str:
+    """Generate a descriptive caption from the uploaded image."""
     captioner = load_image_caption_model()
     return captioner(image)[0]["generated_text"]
 
-def text2story(caption:str) -> str:
+def text2story(caption: str) -> str:
     """
-    Generate 3 children's story candidates using a safe fine‑tuned model,
-    and automatically pick the best one based on length and completeness.
+    Generate 3 story candidates with GPT-2 and select the best one.
+    The scoring automatically rejects unsafe content.
     """
     generator = load_story_generator_model()
     prompt = f"Once upon a time, there was {caption}."
 
     best_story = ""
-    best_score = -1
+    best_score = -999
 
     # Generate 3 candidates
     results = generator(
@@ -97,20 +110,21 @@ def text2story(caption:str) -> str:
         full_text = r["generated_text"].strip()
         if not full_text.startswith(prompt):
             continue
-        # Trim to complete sentences within ~100 words
-        trimmed = trim_to_sentence_end(full_text, 100)
-        score = story_quality_score(trimmed)
-        if score > best_score:
-            best_score = score
+        # Trim to about 100 words
+        trimmed = trim_to_complete_sentences(full_text, 100)
+        s = story_candidate_score(trimmed)
+        if s > best_score:
+            best_score = s
             best_story = trimmed
 
-    # Fallback in case no candidate qualified
-    if not best_story:
+    # If no good candidate, return a safe, minimal fallback
+    if best_score < 0 or not best_story:
         best_story = f"Once upon a time, there was {caption}. They lived happily ever after. The end."
 
     return best_story
 
-def text2audio(story_text:str) -> str:
+def text2audio(story_text: str) -> str:
+    """Convert story text to speech and return path to MP3."""
     tts = gTTS(story_text, lang="en")
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
         tts.save(fp.name)
@@ -124,7 +138,7 @@ def main():
     st.markdown("**A fun way to turn any picture into a story!** 🌟")
     st.write("Upload an image, and I'll tell you a magical story!")
 
-    uploaded_file = st.file_uploader("Choose an image...", type=["jpg","jpeg","png"])
+    uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
 
     if uploaded_file is not None:
         image = Image.open(uploaded_file).convert("RGB")
